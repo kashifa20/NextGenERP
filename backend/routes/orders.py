@@ -1,15 +1,27 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from auth.dependencies import get_current_user
 from database.connection import engine
 from models.order import Order
 from models.product import Product
 from schemas.order import OrderCreate, OrderStatusUpdate, OrderUpdate
 
 
-router = APIRouter(prefix="/orders", tags=["Orders"])
+router = APIRouter(
+    prefix="/orders",
+    tags=["Orders"],
+    dependencies=[Depends(get_current_user)],
+)
 
-ALLOWED_STATUSES = {"Pending", "Confirmed", "Shipped", "Delivered", "Cancelled"}
+STATUS_TRANSITIONS = {
+    "Pending": {"Confirmed", "Cancelled"},
+    "Confirmed": {"Shipped", "Cancelled"},
+    "Shipped": {"Delivered"},
+    "Delivered": set(),
+    "Cancelled": set(),
+}
 
 
 def get_db():
@@ -19,13 +31,25 @@ def get_db():
 
 @router.post("/")
 def create_order(order_data: OrderCreate, db: Session = Depends(get_db)):
-    product = db.query(Product).filter(Product.id == order_data.product_id).first()
+    customer_name = order_data.customer_name.strip()
+    if not customer_name:
+        raise HTTPException(status_code=400, detail="Customer name is required")
+
+    product = (
+        db.query(Product)
+        .filter(Product.id == order_data.product_id)
+        .with_for_update()
+        .first()
+    )
 
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
     if order_data.quantity <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be greater than 0")
+
+    if product.stock_quantity is None or product.stock_quantity < 0:
+        raise HTTPException(status_code=409, detail="Product inventory quantity is invalid")
 
     if product.stock_quantity < order_data.quantity:
         raise HTTPException(status_code=400, detail="Insufficient stock for this product")
@@ -34,7 +58,7 @@ def create_order(order_data: OrderCreate, db: Session = Depends(get_db)):
     product.stock_quantity -= order_data.quantity
 
     new_order = Order(
-        customer_name=order_data.customer_name,
+        customer_name=customer_name,
         customer_email=order_data.customer_email,
         product_id=order_data.product_id,
         quantity=order_data.quantity,
@@ -43,7 +67,11 @@ def create_order(order_data: OrderCreate, db: Session = Depends(get_db)):
     )
 
     db.add(new_order)
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise
     db.refresh(new_order)
     return new_order
 
@@ -88,19 +116,55 @@ def update_order_status(
     status_data: OrderStatusUpdate,
     db: Session = Depends(get_db),
 ):
-    if status_data.status not in ALLOWED_STATUSES:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid status. Allowed statuses: Pending, Confirmed, Shipped, Delivered, Cancelled",
-        )
-
-    order = db.query(Order).filter(Order.id == order_id).first()
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .with_for_update()
+        .first()
+    )
 
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
+    if status_data.status == order.status:
+        return order
+
+    allowed_statuses = STATUS_TRANSITIONS.get(order.status)
+    if allowed_statuses is None or status_data.status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot change sales order status from {order.status} to {status_data.status}",
+        )
+
+    if status_data.status == "Cancelled":
+        product = (
+            db.query(Product)
+            .filter(Product.id == order.product_id)
+            .with_for_update()
+            .first()
+        )
+
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found")
+        if (
+            order.quantity is None
+            or order.quantity <= 0
+            or product.stock_quantity is None
+            or product.stock_quantity < 0
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Sales order quantity or product inventory data is invalid",
+            )
+
+        product.stock_quantity += order.quantity
+
     order.status = status_data.status
-    db.commit()
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise
     db.refresh(order)
     return order
 
@@ -112,6 +176,7 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    db.delete(order)
-    db.commit()
-    return {"message": "Order deleted successfully"}
+    raise HTTPException(
+        status_code=409,
+        detail="Sales order history cannot be deleted; change its status to Cancelled instead",
+    )

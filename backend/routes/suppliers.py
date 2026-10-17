@@ -1,12 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from auth.dependencies import get_current_user
 from database.connection import engine
+from models.purchase_order import PurchaseOrder
 from models.supplier import Supplier
 from schemas.supplier import SupplierCreate
 
 
-router = APIRouter(prefix="/suppliers", tags=["Suppliers"])
+router = APIRouter(
+    prefix="/suppliers",
+    tags=["Suppliers"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 def get_db():
@@ -71,11 +78,29 @@ def update_supplier(
 
 @router.delete("/{supplier_id}")
 def delete_supplier(supplier_id: int, db: Session = Depends(get_db)):
-    supplier = db.query(Supplier).filter(Supplier.id == supplier_id).first()
+    supplier = (
+        db.query(Supplier)
+        .filter(Supplier.id == supplier_id)
+        .with_for_update()
+        .first()
+    )
 
     if not supplier:
         raise HTTPException(status_code=404, detail="Supplier not found")
 
+    if db.query(PurchaseOrder.id).filter(PurchaseOrder.supplier_id == supplier_id).first():
+        raise HTTPException(
+            status_code=409,
+            detail="Supplier cannot be deleted because it is referenced by purchase orders",
+        )
+
     db.delete(supplier)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Supplier cannot be deleted while purchase orders reference it",
+        ) from error
     return {"message": "Supplier deleted successfully"}
