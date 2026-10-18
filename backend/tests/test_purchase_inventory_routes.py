@@ -32,6 +32,7 @@ def test_purchase_order_rejects_invalid_relationships_and_quantities(
     assert submit_purchase_order(client, supplier["id"], 999999).status_code == 404
     assert submit_purchase_order(client, supplier["id"], product["id"], 0).status_code == 400
     assert submit_purchase_order(client, supplier["id"], product["id"], -1).status_code == 400
+    assert submit_purchase_order(client, supplier["id"], product["id"], 1.5).status_code == 422
 
 
 def test_purchase_order_receives_stock_exactly_once_and_cannot_be_deleted(
@@ -72,6 +73,13 @@ def test_purchase_order_receives_stock_exactly_once_and_cannot_be_deleted(
     )
     assert received.status_code == 200
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 9
+    history = client.get("/inventory-transactions/").json()
+    assert len(history) == 2
+    assert history[0]["transaction_type"] == "Stock In"
+    assert history[0]["quantity"] == 4
+    assert history[0]["previous_stock"] == 5
+    assert history[0]["new_stock"] == 9
+    assert "Purchase order #" in history[0]["reason"]
 
     repeated = set_purchase_order_status(
         client,
@@ -80,6 +88,7 @@ def test_purchase_order_receives_stock_exactly_once_and_cannot_be_deleted(
     )
     assert repeated.status_code == 200
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 9
+    assert len(client.get("/inventory-transactions/").json()) == 2
 
     assert set_purchase_order_status(
         client,
@@ -92,6 +101,62 @@ def test_purchase_order_receives_stock_exactly_once_and_cannot_be_deleted(
     assert client.delete(f"/suppliers/{supplier['id']}").status_code == 409
     assert client.delete(f"/products/{product['id']}").status_code == 409
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 9
+
+
+def test_approved_purchase_order_can_be_received_once_with_audit_history(
+    client,
+    create_product,
+    create_supplier,
+):
+    product = create_product(stock_quantity=5)
+    supplier = create_supplier()
+    purchase_order = submit_purchase_order(
+        client,
+        supplier["id"],
+        product["id"],
+        4,
+    ).json()
+    assert set_purchase_order_status(
+        client,
+        purchase_order["id"],
+        "Approved",
+    ).status_code == 200
+
+    received = set_purchase_order_status(
+        client,
+        purchase_order["id"],
+        "Received",
+    )
+
+    assert received.status_code == 200
+    assert received.json()["status"] == "Received"
+    assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 9
+    receipt_history = [
+        transaction
+        for transaction in client.get("/inventory-transactions/").json()
+        if transaction["reason"] == f"Purchase order #{purchase_order['id']} received"
+    ]
+    assert len(receipt_history) == 1
+    assert receipt_history[0]["product_id"] == product["id"]
+    assert receipt_history[0]["transaction_type"] == "Stock In"
+    assert receipt_history[0]["quantity"] == 4
+    assert receipt_history[0]["previous_stock"] == 5
+    assert receipt_history[0]["new_stock"] == 9
+
+    repeated = set_purchase_order_status(
+        client,
+        purchase_order["id"],
+        "Received",
+    )
+
+    assert repeated.status_code == 200
+    assert repeated.json()["status"] == "Received"
+    assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 9
+    assert len([
+        transaction
+        for transaction in client.get("/inventory-transactions/").json()
+        if transaction["reason"] == f"Purchase order #{purchase_order['id']} received"
+    ]) == 1
 
 
 def test_cancelling_unreceived_purchase_order_never_changes_stock(
@@ -115,12 +180,22 @@ def test_cancelling_unreceived_purchase_order_never_changes_stock(
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "Cancelled"
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 5
+    history = client.get("/inventory-transactions/").json()
+    assert len(history) == 1
+    assert "Initial stock" in history[0]["reason"]
+    assert set_purchase_order_status(
+        client,
+        purchase_order["id"],
+        "Received",
+    ).status_code == 400
 
     assert set_purchase_order_status(
         client,
         purchase_order["id"],
         "Approved",
     ).status_code == 400
+    assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 5
+    assert len(client.get("/inventory-transactions/").json()) == 1
     assert client.delete(
         f"/purchase-orders/{purchase_order['id']}"
     ).status_code == 200
@@ -194,7 +269,7 @@ def test_inventory_transactions_update_stock_and_record_history(
 
     history = client.get("/inventory-transactions/")
     assert history.status_code == 200
-    assert len(history.json()) == 2
+    assert len(history.json()) == 3
     assert history.json()[0]["product_name"] == product["name"]
 
 
@@ -239,4 +314,5 @@ def test_inventory_transactions_reject_invalid_ids_quantities_and_stock_out(
         json=insufficient_stock,
     ).status_code == 400
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 2
-    assert client.get("/inventory-transactions/").json() == []
+    history = client.get("/inventory-transactions/").json()
+    assert len(history) == 1

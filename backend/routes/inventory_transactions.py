@@ -10,6 +10,7 @@ from schemas.inventory_transaction import (
     InventoryTransactionCreate,
     InventoryTransactionHistory,
 )
+from services.inventory import change_stock
 
 
 router = APIRouter(
@@ -38,30 +39,13 @@ def create_inventory_transaction(
 
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
-    if product.stock_quantity is None or product.stock_quantity < 0:
-        raise HTTPException(status_code=409, detail="Product inventory quantity is invalid")
-
-    previous_stock = product.stock_quantity
-    if transaction_data.transaction_type == "Stock In":
-        new_stock = previous_stock + transaction_data.quantity
-    else:
-        if transaction_data.quantity > previous_stock:
-            raise HTTPException(
-                status_code=400,
-                detail="Insufficient stock for this stock-out transaction",
-            )
-        new_stock = previous_stock - transaction_data.quantity
-
-    product.stock_quantity = new_stock
-    transaction = InventoryTransaction(
-        product_id=product.id,
-        transaction_type=transaction_data.transaction_type,
-        quantity=transaction_data.quantity,
-        previous_stock=previous_stock,
-        new_stock=new_stock,
-        reason=transaction_data.reason,
+    transaction = change_stock(
+        db,
+        product,
+        transaction_data.transaction_type,
+        transaction_data.quantity,
+        transaction_data.reason,
     )
-    db.add(transaction)
 
     try:
         db.commit()

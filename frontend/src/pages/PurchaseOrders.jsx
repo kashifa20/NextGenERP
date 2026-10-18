@@ -319,6 +319,31 @@ export default function PurchaseOrders() {
     }
   }
 
+  async function receivePurchaseOrder(purchaseOrder) {
+    if (!['Approved', 'Ordered'].includes(purchaseOrder.status) || updatingStatus || deleting) return;
+
+    setUpdatingStatus(true);
+    setError('');
+    try {
+      const response = await apiFetch(`${PURCHASE_ORDERS_URL}${purchaseOrder.id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'Received' }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await readApiError(response, 'Stock could not be received'));
+      }
+
+      setSuccessMessage(`Stock received for purchase order #${purchaseOrder.id}.`);
+      await loadPurchaseOrders(true);
+    } catch (requestError) {
+      setError(getErrorMessage(requestError));
+    } finally {
+      setUpdatingStatus(false);
+    }
+  }
+
   function openDeleteConfirmation(purchaseOrder) {
     if (purchaseOrder.status === 'Received') return;
     setSelectedDeleteOrder(purchaseOrder);
@@ -522,6 +547,16 @@ export default function PurchaseOrders() {
                         >
                           Edit Status
                         </button>
+                        {['Approved', 'Ordered'].includes(purchaseOrder.status) && (
+                          <button
+                            type="button"
+                            onClick={() => receivePurchaseOrder(purchaseOrder)}
+                            disabled={updatingStatus || deleting}
+                            className="rounded bg-teal-800 px-2.5 py-1 text-xs font-semibold text-white transition hover:bg-teal-900 focus:outline-none focus:ring-2 focus:ring-teal-600 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Receive Stock
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => openDeleteConfirmation(purchaseOrder)}
@@ -787,6 +822,7 @@ export default function PurchaseOrders() {
               className="w-full rounded-md border border-stone-300 bg-white px-3 py-2.5 text-sm text-stone-900 shadow-sm outline-none transition focus:border-teal-600 focus:ring-2 focus:ring-teal-100 disabled:cursor-not-allowed disabled:bg-stone-100"
             >
               {[selectedStatusOrder?.status, ...(PURCHASE_ORDER_STATUS_TRANSITIONS[selectedStatusOrder?.status] ?? PURCHASE_ORDER_STATUSES)]
+                .filter((status) => status !== 'Received')
                 .filter((status, index, statuses) => statuses.indexOf(status) === index)
                 .map((status) => (
                 <option key={status} value={status}>{status}</option>

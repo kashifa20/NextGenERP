@@ -1,11 +1,11 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 
 class OrderCreate(BaseModel):
     customer_name: str
     customer_email: str | None = None
     product_id: int
-    quantity: int
+    quantity: StrictInt
 
 
 class OrderUpdate(BaseModel):

@@ -54,6 +54,45 @@ def test_product_crud_and_invalid_references(client, create_product):
     assert updated.status_code == 200
     assert updated.json()["stock_quantity"] == 8
 
+    history = client.get("/inventory-transactions/").json()
+    assert len(history) == 2
+    adjustment = next(item for item in history if "adjusted via product update" in item["reason"].lower())
+    assert adjustment["transaction_type"] == "Stock Out"
+    assert adjustment["quantity"] == 2
+    assert adjustment["previous_stock"] == 10
+    assert adjustment["new_stock"] == 8
+    opening_stock = next(item for item in history if "initial stock" in item["reason"].lower())
+    assert opening_stock["previous_stock"] == 0
+    assert opening_stock["new_stock"] == 10
+
+    unchanged_stock_update = client.put(
+        f"/products/{product['id']}",
+        json={
+            "name": "Updated product details",
+            "sku": product["sku"],
+            "price": 15,
+            "stock_quantity": 8,
+            "reorder_level": 2,
+            "category_id": None,
+        },
+    )
+    assert unchanged_stock_update.status_code == 200
+    assert len(client.get("/inventory-transactions/").json()) == 2
+
+    fractional_stock_update = client.put(
+        f"/products/{product['id']}",
+        json={
+            "name": "Updated product details",
+            "sku": product["sku"],
+            "price": 15,
+            "stock_quantity": 8.5,
+            "reorder_level": 2,
+            "category_id": None,
+        },
+    )
+    assert fractional_stock_update.status_code == 422
+    assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 8
+
     assert client.get("/products/999999").status_code == 404
     invalid_id_update = client.put(
         "/products/999999",

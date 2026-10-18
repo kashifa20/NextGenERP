@@ -10,6 +10,7 @@ from models.product import Product
 from models.purchase_order import PurchaseOrder
 from models.supplier import Supplier
 from schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderStatusUpdate
+from services.inventory import change_stock
 
 
 router = APIRouter(
@@ -20,7 +21,7 @@ router = APIRouter(
 
 STATUS_TRANSITIONS = {
     "Pending": {"Approved", "Cancelled"},
-    "Approved": {"Ordered", "Cancelled"},
+    "Approved": {"Ordered", "Received", "Cancelled"},
     "Ordered": {"Received", "Cancelled"},
     "Received": set(),
     "Cancelled": set(),
@@ -140,10 +141,13 @@ def update_purchase_order_status(
 
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
-        if product.stock_quantity is None or product.stock_quantity < 0:
-            raise HTTPException(status_code=409, detail="Product inventory quantity is invalid")
-
-        product.stock_quantity += purchase_order.quantity
+        change_stock(
+            db,
+            product,
+            "Stock In",
+            purchase_order.quantity,
+            f"Purchase order #{purchase_order.id} received",
+        )
 
     purchase_order.status = status_data.status
     try:

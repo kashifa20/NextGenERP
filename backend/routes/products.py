@@ -1,7 +1,7 @@
 import math
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from auth.dependencies import get_current_user
@@ -11,6 +11,7 @@ from models.order import Order
 from models.product import Product
 from models.purchase_order import PurchaseOrder
 from schemas.product import ProductCreate
+from services.inventory import change_stock
 
 
 router = APIRouter(
@@ -57,17 +58,27 @@ def validate_product(product_data: ProductCreate, db: Session, product_id: int |
 @router.post("/")
 def create_product(product: ProductCreate, db: Session = Depends(get_db)):
     name, sku = validate_product(product, db)
+    initial_stock = product.stock_quantity
     new_product = Product(
         name=name,
         sku=sku,
         price=product.price,
-        stock_quantity=product.stock_quantity,
+        stock_quantity=0,
         reorder_level=product.reorder_level,
         category_id=product.category_id
     )
 
     db.add(new_product)
     try:
+        db.flush()
+        if initial_stock > 0:
+            change_stock(
+                db,
+                new_product,
+                "Stock In",
+                initial_stock,
+                f"Initial stock for product #{new_product.id}",
+            )
         db.commit()
     except IntegrityError as error:
         db.rollback()
@@ -75,6 +86,9 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
             status_code=409,
             detail="Product could not be saved because its SKU or category conflicts with existing data",
         ) from error
+    except SQLAlchemyError:
+        db.rollback()
+        raise
     db.refresh(new_product)
 
     return new_product
@@ -121,7 +135,16 @@ def update_product(
     product.name = name
     product.sku = sku
     product.price = product_data.price
-    product.stock_quantity = product_data.stock_quantity
+    if product.stock_quantity is None or product.stock_quantity < 0:
+        raise HTTPException(status_code=409, detail="Product inventory quantity is invalid")
+    if product_data.stock_quantity != product.stock_quantity:
+        change_stock(
+            db,
+            product,
+            "Stock In" if product_data.stock_quantity > product.stock_quantity else "Stock Out",
+            abs(product_data.stock_quantity - product.stock_quantity),
+            f"Product #{product.id} stock quantity adjusted via product update",
+        )
     product.reorder_level = product_data.reorder_level
     product.category_id = product_data.category_id
 
@@ -133,6 +156,9 @@ def update_product(
             status_code=409,
             detail="Product could not be saved because its SKU or category conflicts with existing data",
         ) from error
+    except SQLAlchemyError:
+        db.rollback()
+        raise
     db.refresh(product)
 
     return product

@@ -7,6 +7,7 @@ from database.connection import engine
 from models.order import Order
 from models.product import Product
 from schemas.order import OrderCreate, OrderStatusUpdate, OrderUpdate
+from services.inventory import change_stock
 
 
 router = APIRouter(
@@ -55,7 +56,6 @@ def create_order(order_data: OrderCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Insufficient stock for this product")
 
     total_amount = product.price * order_data.quantity
-    product.stock_quantity -= order_data.quantity
 
     new_order = Order(
         customer_name=customer_name,
@@ -68,6 +68,14 @@ def create_order(order_data: OrderCreate, db: Session = Depends(get_db)):
 
     db.add(new_order)
     try:
+        db.flush()
+        change_stock(
+            db,
+            product,
+            "Stock Out",
+            order_data.quantity,
+            f"Sales order #{new_order.id} created",
+        )
         db.commit()
     except SQLAlchemyError:
         db.rollback()
@@ -146,18 +154,19 @@ def update_order_status(
 
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
-        if (
-            order.quantity is None
-            or order.quantity <= 0
-            or product.stock_quantity is None
-            or product.stock_quantity < 0
-        ):
+        if order.quantity is None or order.quantity <= 0:
             raise HTTPException(
                 status_code=409,
-                detail="Sales order quantity or product inventory data is invalid",
+                detail="Sales order quantity is invalid",
             )
 
-        product.stock_quantity += order.quantity
+        change_stock(
+            db,
+            product,
+            "Stock In",
+            order.quantity,
+            f"Sales order #{order.id} cancelled",
+        )
 
     order.status = status_data.status
     try:

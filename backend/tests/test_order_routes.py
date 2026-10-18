@@ -34,6 +34,18 @@ def test_sales_order_reduces_stock_and_checks_product_and_quantity(
     assert order.json()["status"] == "Pending"
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 3
 
+    history = client.get("/inventory-transactions/").json()
+    assert len(history) == 2
+    sales_movement = next(item for item in history if "Sales order #" in item["reason"])
+    assert sales_movement["product_id"] == product["id"]
+    assert sales_movement["transaction_type"] == "Stock Out"
+    assert sales_movement["quantity"] == 2
+    assert sales_movement["previous_stock"] == 5
+    assert sales_movement["new_stock"] == 3
+    opening_stock = next(item for item in history if "Initial stock" in item["reason"])
+    assert opening_stock["previous_stock"] == 0
+    assert opening_stock["new_stock"] == 5
+
 
 def test_sales_order_valid_transitions_and_rejects_invalid_jumps(
     client,
@@ -57,6 +69,7 @@ def test_sales_order_valid_transitions_and_rejects_invalid_jumps(
         assert response.status_code == 200
         assert response.json()["status"] == status
 
+    assert len(client.get("/inventory-transactions/").json()) == 2
     assert client.put(
         f"/orders/{order_id}/status",
         json={"status": "Cancelled"},
@@ -78,6 +91,13 @@ def test_sales_order_cancellation_restores_stock_once_and_is_terminal(
     assert cancellation.status_code == 200
     assert cancellation.json()["status"] == "Cancelled"
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 10
+    history = client.get("/inventory-transactions/").json()
+    assert len(history) == 3
+    assert history[0]["transaction_type"] == "Stock In"
+    assert history[0]["quantity"] == 4
+    assert history[0]["previous_stock"] == 6
+    assert history[0]["new_stock"] == 10
+    assert "cancelled" in history[0]["reason"].lower()
 
     repeated = client.put(
         f"/orders/{order['id']}/status",
@@ -85,6 +105,7 @@ def test_sales_order_cancellation_restores_stock_once_and_is_terminal(
     )
     assert repeated.status_code == 200
     assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 10
+    assert len(client.get("/inventory-transactions/").json()) == 3
 
     cannot_reopen = client.put(
         f"/orders/{order['id']}/status",
@@ -127,3 +148,13 @@ def test_sales_order_rejects_unknown_status(client, create_product):
         json={"status": "Returned"},
     )
     assert response.status_code == 400
+
+
+def test_sales_order_rejects_fractional_quantity(client, create_product):
+    product = create_product()
+
+    response = submit_order(client, product["id"], 1.5)
+
+    assert response.status_code == 422
+    assert client.get(f"/products/{product['id']}").json()["stock_quantity"] == 10
+    assert len(client.get("/inventory-transactions/").json()) == 1
